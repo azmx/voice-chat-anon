@@ -22,10 +22,12 @@ app.get("/ice-config", (req, res) => {
   res.json({ iceServers });
 });
 
-let waiting = [];            // antrean socket id
-const partners = new Map();  // socket id -> socket id lawan
+let waiting = []; // antrean socket id
+const partners = new Map(); // socket id -> socket id lawan
 
-const dequeue = (id) => { waiting = waiting.filter((x) => x !== id); };
+const dequeue = (id) => {
+  waiting = waiting.filter((x) => x !== id);
+};
 const unpair = (id) => {
   const p = partners.get(id);
   if (p) {
@@ -38,6 +40,7 @@ const broadcastOnline = () => io.emit("online", io.engine.clientsCount);
 
 io.on("connection", (socket) => {
   broadcastOnline();
+  console.log(`[masuk] ${socket.id} (online: ${io.engine.clientsCount})`);
 
   socket.on("search", () => {
     unpair(socket.id);
@@ -46,9 +49,11 @@ io.on("connection", (socket) => {
     let peer = null;
     while (waiting.length && !peer) {
       const candidate = waiting.shift();
-      if (io.sockets.sockets.has(candidate) && candidate !== socket.id) peer = candidate;
+      if (io.sockets.sockets.has(candidate) && candidate !== socket.id)
+        peer = candidate;
     }
     if (peer) {
+      console.log(`[match] ${socket.id} <-> ${peer}`);
       partners.set(socket.id, peer);
       partners.set(peer, socket.id);
       socket.emit("matched", { initiator: true });
@@ -69,9 +74,13 @@ io.on("connection", (socket) => {
     if (p) console.log(`[report] ${socket.id} melaporkan ${p}`);
   });
 
-  socket.on("leave", () => { dequeue(socket.id); unpair(socket.id); });
+  socket.on("leave", () => {
+    dequeue(socket.id);
+    unpair(socket.id);
+  });
 
   socket.on("disconnect", () => {
+    console.log(`[keluar] ${socket.id}`);
     dequeue(socket.id);
     unpair(socket.id);
     broadcastOnline();
