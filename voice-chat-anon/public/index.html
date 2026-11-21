@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ngobrol Suara Anonim</title>
+<style>
+  :root {
+    --bg: #1c2540; --surface: #26325a; --text: #eef1f9; --muted: #9aa6c8;
+    --accent: #ffb547; --live: #5fd4a0; --danger: #ff7b7b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 28px; padding: 24px; text-align: center;
+  }
+  h1 { font-size: 1.5rem; margin: 0; font-weight: 700; }
+  #online { color: var(--muted); font-size: .95rem; }
+  #main {
+    width: 200px; height: 200px; border-radius: 50%; border: 0; cursor: pointer;
+    background: var(--accent); color: #2a1d00; font: 700 1.25rem inherit; font-family: inherit;
+    transition: background .2s, transform .1s;
+  }
+  #main:active { transform: scale(.97); }
+  #main:focus-visible, .ctl:focus-visible { outline: 3px solid var(--text); outline-offset: 4px; }
+  body[data-state="searching"] #main { background: var(--surface); color: var(--text); animation: pulse 1.6s ease-in-out infinite; }
+  body[data-state="live"] #main { background: var(--live); color: #06281a; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 22px rgba(255,181,71,.15); } }
+  @media (prefers-reduced-motion: reduce) { body[data-state="searching"] #main { animation: none; } }
+  #status { min-height: 1.6em; font-size: 1.05rem; }
+  #timer { color: var(--muted); font-variant-numeric: tabular-nums; min-height: 1.4em; }
+  #controls { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .ctl {
+    background: var(--surface); color: var(--text); border: 0; border-radius: 999px;
+    padding: 12px 20px; font: inherit; cursor: pointer;
+  }
+  .ctl[hidden] { display: none; }
+  .ctl.danger { color: var(--danger); }
+  audio { display: none; }
+</style>
+</head>
+<body data-state="idle">
+  <h1>Ngobrol suara dengan orang asing</h1>
+  <div id="online">Menghubungkan ke server…</div>
+
+  <button id="main">Mulai</button>
+  <div>
+    <div id="status">Tekan Mulai untuk dicarikan lawan bicara.</div>
+    <div id="timer"></div>
+  </div>
+
+  <div id="controls">
+    <button class="ctl" id="mute" hidden>Matikan mikrofon</button>
+    <button class="ctl" id="next" hidden>Lawan berikutnya</button>
+    <button class="ctl danger" id="report" hidden>Laporkan</button>
+    <button class="ctl" id="stop" hidden>Berhenti</button>
+  </div>
+  <audio id="remote" autoplay playsinline></audio>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const socket = io();
+let pc = null, localStream = null, iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+let timerId = null, startedAt = 0, chain = Promise.resolve();
+
+function setState(state, text) {
+  document.body.dataset.state = state;
+  $("status").textContent = text;
+  const live = state === "live", searching = state === "searching";
+  $("main").textContent = state === "idle" ? "Mulai" : searching ? "Mencari…" : "Terhubung";
+  $("main").disabled = state !== "idle";
+  $("mute").hidden = !live;
+  $("report").hidden = !live;
+  $("next").hidden = state === "idle";
+  $("stop").hidden = state === "idle";
+}
+
+function startTimer() {
+  startedAt = Date.now();
+  timerId = setInterval(() => {
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    $("timer").textContent = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+  }, 500);
+}
+function stopTimer() { clearInterval(timerId); $("timer").textContent = ""; }
+
+function closePeer() {
+  if (pc) { pc.onicecandidate = pc.ontrack = pc.onconnectionstatechange = null; pc.close(); pc = null; }
+  $("remote").srcObject = null;
+  stopTimer();
+  chain = Promise.resolve();
+}
+
+async function getMic() {
+  if (localStream) return localStream;
+  localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  return localStream;
+}
+
+async function search() {
+  try {
+    await getMic();
+  } catch {
+    setState("idle", "Mikrofon tidak bisa diakses. Izinkan akses mikrofon di browser lalu coba lagi.");
+    return;
+  }
+  closePeer();
+  setState("searching", "Mencari lawan bicara…");
+  socket.emit("search");
+}
+
+function createPeer() {
+  pc = new RTCPeerConnection({ iceServers });
+  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  pc.onicecandidate = (e) => { if (e.candidate) socket.emit("signal", { candidate: e.candidate }); };
+  pc.ontrack = (e) => { $("remote").srcObject = e.streams[0]; };
+  pc.onconnectionstatechange = () => {
+    if (!pc) return;
+    if (pc.connectionState === "connected") { setState("live", "Terhubung. Silakan bicara."); startTimer(); }
+    if (pc.connectionState === "failed") { setState("idle", "Koneksi gagal. Coba lagi (mungkin butuh server TURN)."); socket.emit("leave"); closePeer(); }
+  };
+}
+
+socket.on("matched", async ({ initiator }) => {
+  setState("searching", "Lawan ditemukan, menyambungkan…");
+  createPeer();
+  if (initiator) {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit("signal", { description: pc.localDescription });
+  }
+});
+
+socket.on("signal", (data) => {
+  // Antrekan agar offer/answer/candidate diproses berurutan
+  chain = chain.then(async () => {
+    if (!pc) return;
+    if (data.description) {
+      await pc.setRemoteDescription(data.description);
+      if (data.description.type === "offer") {
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit("signal", { description: pc.localDescription });
+      }
+    } else if (data.candidate) {
+      await pc.addIceCandidate(data.candidate);
+    }
+  }).catch(console.error);
+});
+
+socket.on("peer-left", () => {
+  closePeer();
+  setState("searching", "Lawan bicara pergi. Mencari yang baru…");
+  socket.emit("search");
+});
+
+socket.on("online", (n) => { $("online").textContent = n + " orang online"; });
+socket.on("connect_error", () => { $("online").textContent = "Server tidak terjangkau"; });
+
+$("main").onclick = search;
+$("next").onclick = search;
+$("stop").onclick = () => { socket.emit("leave"); closePeer(); setState("idle", "Berhenti. Tekan Mulai kapan saja."); };
+$("report").onclick = () => { socket.emit("report"); search(); };
+$("mute").onclick = () => {
+  const track = localStream.getAudioTracks()[0];
+  track.enabled = !track.enabled;
+  $("mute").textContent = track.enabled ? "Matikan mikrofon" : "Nyalakan mikrofon";
+};
+
+fetch("/ice-config").then((r) => r.json()).then((c) => { iceServers = c.iceServers; }).catch(() => {});
+setState("idle", "Tekan Mulai untuk dicarikan lawan bicara.");
+</script>
+</body>
+</html>
